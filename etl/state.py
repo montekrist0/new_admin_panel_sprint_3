@@ -62,4 +62,7 @@ def clear_cache(cache: Redis):
 if __name__ == '__main__':
     r = Redis()
 
+    data = r.data
+
+
     clear_cache(r)

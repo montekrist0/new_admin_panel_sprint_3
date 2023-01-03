@@ -5,7 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV HOME=/home/app
 ENV APP_HOME=/home/app/etl
 
-RUN mkdir -p $APP_HOME
 WORKDIR $APP_HOME
 
 COPY ./requirements.txt .

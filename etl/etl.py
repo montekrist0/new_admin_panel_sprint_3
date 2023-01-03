@@ -9,7 +9,7 @@ from elasticsearch import Elasticsearch, helpers
 from psycopg2.extras import DictCursor
 from queries import query_film_work
 from redis import Redis
-from settings import dsl
+from settings import dsl, ELASTIC_HOST, REDIS_HOST, SLEEP_TIME
 from state import RedisStorage, State
 
 logging.basicConfig(
@@ -48,8 +48,8 @@ def pg_context(params: dict):
     conn = connect_db(params)
     cursor = conn.cursor()
     yield cursor
-    conn.close()
     cursor.close()
+    conn.close()
 
 
 def pg_getdata_backoff_hdlr(details):
@@ -119,7 +119,7 @@ def elastic_conn_backoff_hdlr(details):
 def create_elastic():
     with open("index_schema.json", encoding="utf-8") as file:
         mapping = json.load(file)
-    es = Elasticsearch("http://elastic:9200")
+    es = Elasticsearch(ELASTIC_HOST)
     try:
         es.indices.create(index="movies", **mapping)
     except Exception as exc:
@@ -146,7 +146,7 @@ def transform_data(rows: list):
 def main():
     """Main process"""
     logging.info('Start etl process')
-    state = State(RedisStorage(Redis(host="redis")))
+    state = State(RedisStorage(Redis(host=REDIS_HOST)))
     elastic = create_elastic()
     with pg_context(dsl) as pg_cursor:
         while True:
@@ -166,7 +166,7 @@ def main():
                 load_data_to_elastic(elastic_client=elastic,
                                      transformed_data=transformed_data)
                 state.set_state('last_modified_date', last_modified_date)
-            sleep(1)
+            sleep(SLEEP_TIME)
 
 
 if __name__ == '__main__':
