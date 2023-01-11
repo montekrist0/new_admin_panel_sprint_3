@@ -7,6 +7,9 @@ services:
       - .env
     healthcheck:
       test: [ "CMD", "pg_isready", "-q", "-d", "${POSTGRES_DB}", "-U", "${POSTGRES_USER}" ]
+
+      !!!blablabla!!!здесь нужен коммент
+
       interval: 2s
       timeout: 2s
       retries: 5
@@ -26,6 +29,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+      - и здесь нужен коммент
+
     volumes:
       - redis_volume:/data
     ports:
