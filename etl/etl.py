@@ -11,21 +11,22 @@ from queries import query_film_work
 from redis import Redis
 from settings import dsl, ELASTIC_HOST, REDIS_HOST, SLEEP_TIME
 from state import RedisStorage, State
+from indices import movies_index, person_index, genre_index
+from backoff_handlers import (
+    pg_conn_backoff_hdlr,
+    pg_conn_success_hdlr,
+    pg_getdata_backoff_hdlr,
+    pg_getdata_success_hdlr,
+    elastic_load_data_backoff_hdlr,
+    elastic_conn_backoff_hdlr,
+)
+
 
 logging.basicConfig(
     # filename='etl.log',
     level=logging.INFO,
     format='%(asctime)s:%(levelname)s:%(message)s'
 )
-
-
-def pg_conn_backoff_hdlr(details):
-    logging.info("\t\n ==> Backing off {wait:0.1f} seconds after {tries} tries "
-                 "connection to PostgreSQL".format(**details))
-
-
-def pg_conn_success_hdlr(details):
-    logging.info("==> Successfully connected to PostgreSQL")
 
 
 @backoff.on_exception(
@@ -52,17 +53,6 @@ def pg_context(params: dict):
     conn.close()
 
 
-def pg_getdata_backoff_hdlr(details):
-    logging.info(
-        "\t\n ==> Can't execute query PostgreSQL."
-        "Backing off {wait:0.1f} seconds after {tries} tries"
-        "Details: {args}".format(**details))
-
-
-def pg_getdata_success_hdlr(details):
-    logging.info("==> Query executed successfully to PostgreSQL.")
-
-
 @backoff.on_exception(
     wait_gen=backoff.expo,
     exception=psycopg2.Error,
@@ -84,13 +74,6 @@ def get_data_from_pg(
     return [dict(row) for row in cursor.fetchall()]
 
 
-def elastic_load_data_backoff_hdlr(details):
-    logging.info(
-        "\t\n ==> Can't load data to Elastic query PostgreSQL. "
-        "Backing off {wait:0.1f} seconds after {tries} tries "
-        "Details: {args}".format(**details))
-
-
 @backoff.on_exception(
     wait_gen=backoff.expo,
     exception=Exception,
@@ -101,13 +84,6 @@ def load_data_to_elastic(elastic_client: Elasticsearch,
                          transformed_data: list):
     """Loads list of records in Elasticsearch"""
     helpers.bulk(elastic_client, transformed_data)
-
-
-def elastic_conn_backoff_hdlr(details):
-    logging.info(
-        "\t\n ==> Elastic connection Error. "
-        "Backing off {wait:0.1f} seconds after {tries} tries "
-        "Details: {args}".format(**details))
 
 
 @backoff.on_exception(
@@ -124,6 +100,19 @@ def create_elastic():
         es.indices.create(index="movies", **mapping)
     except Exception as exc:
         logging.info(f"Index insertion error -> {exc}")
+    if not es.ping():
+        raise Exception("Elastic server is not available")
+    return es
+
+
+@backoff.on_exception(
+    wait_gen=backoff.expo,
+    exception=Exception,
+    on_backoff=elastic_conn_backoff_hdlr,
+    max_tries=10
+)
+def create_elastic_connection():
+    es = Elasticsearch(ELASTIC_HOST)
     if not es.ping():
         raise Exception("Elastic server is not available")
     return es
@@ -147,7 +136,7 @@ def main():
     """Main process"""
     logging.info('Start etl process')
     state = State(RedisStorage(Redis(host=REDIS_HOST)))
-    elastic = create_elastic()
+    elastic = create_elastic_connection()
     with pg_context(dsl) as pg_cursor:
         while True:
             last_modified_date = state.get_state('last_modified_date')
