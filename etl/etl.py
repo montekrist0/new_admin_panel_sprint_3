@@ -13,7 +13,7 @@ from settings import dsl, ELASTIC_HOST, REDIS_HOST, SLEEP_TIME
 from state import RedisStorage, State
 
 logging.basicConfig(
-    filename='etl.log',
+    # filename='etl.log',
     level=logging.INFO,
     format='%(asctime)s:%(levelname)s:%(message)s'
 )

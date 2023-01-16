@@ -29,18 +29,38 @@ WITH modified_genres AS (
 SELECT
    fw.id,
    fw.rating AS imdb_rating,
-   array_agg(DISTINCT g.name) as genre,
+   COALESCE (
+       json_agg(
+           DISTINCT jsonb_build_object(
+               'id', g.id,
+               'name', g.name
+           )
+       ),
+       '[]'
+   ) as genres,
    fw.title,
    fw.description,
    ordered_records.modified,
-   COALESCE(array_agg(DISTINCT p.full_name) FILTER (WHERE pfw.role = 'director' AND p.full_name IS NOT NULL), '{{}}') AS director,
-   COALESCE(array_agg(DISTINCT p.full_name) FILTER (WHERE pfw.role = 'actor' AND p.full_name IS NOT NULL), '{{}}') AS actors_names,
-   COALESCE(array_agg(DISTINCT p.full_name) FILTER (WHERE pfw.role = 'writer' AND p.full_name IS NOT NULL), '{{}}') AS writers_names,
+   COALESCE (
+        array_agg(DISTINCT p.full_name) 
+            FILTER (WHERE pfw.role = 'director' AND p.full_name IS NOT NULL), 
+        '{{}}'
+   ) AS director,
+   COALESCE (
+        array_agg(DISTINCT p.full_name) 
+            FILTER (WHERE pfw.role = 'actor' AND p.full_name IS NOT NULL), 
+        '{{}}'
+   ) AS actors_names,
+   COALESCE (
+        array_agg(DISTINCT p.full_name) 
+            FILTER (WHERE pfw.role = 'writer' AND p.full_name IS NOT NULL), 
+        '{{}}'
+   ) AS writers_names,
    COALESCE (
        json_agg(
            DISTINCT jsonb_build_object(
                'id', p.id,
-               'name', p.full_name
+               'full_name', p.full_name
            )
        ) FILTER (WHERE pfw.role = 'actor'),
        '[]'
@@ -49,7 +69,7 @@ SELECT
        json_agg(
            DISTINCT jsonb_build_object(
                'id', p.id,
-               'name', p.full_name
+               'full_name', p.full_name
            )
        ) FILTER (WHERE pfw.role = 'writer'),
        '[]'
@@ -63,4 +83,56 @@ LEFT JOIN content.genre g ON g.id = gfw.genre_id
 GROUP BY fw.id, ordered_records.modified
 ORDER BY ordered_records.modified
 LIMIT {batch_size};
+"""
+
+query_persons = """
+SELECT
+    p.id,
+    p.full_name,
+    COALESCE (
+        array_agg(DISTINCT pfw.role) 
+            FILTER (WHERE pfw.role IS NOT NULL), 
+        '{{}}'
+   ) AS role,
+    COALESCE (
+        array_agg(DISTINCT pfw.film_work_id),
+        '{{}}'
+   ) AS film_ids
+FROM
+    content.person_film_work pfw
+    LEFT JOIN content.person p ON p.id = pfw.person_id
+WHERE p.modified > '{last_md_date}'
+GROUP BY p.id
+ORDER BY p.modified
+LIMIT {batch_size}
+"""
+
+query_persons_test = """
+SELECT
+    p.id,
+    p.full_name,
+    COALESCE (
+        array_agg(DISTINCT pfw.role) 
+            FILTER (WHERE pfw.role IS NOT NULL), 
+        '{}'
+   ) AS role,
+    COALESCE (
+        array_agg(DISTINCT pfw.film_work_id),
+        '{}'
+   ) AS film_ids
+FROM
+    content.person_film_work pfw
+    LEFT JOIN content.person p ON p.id = pfw.person_id
+GROUP BY p.id
+ORDER BY p.modified
+"""
+
+query_genres = """
+SELECT
+    g.id,
+    g.name
+FROM
+    content.genre g
+WHERE g.modified > '{last_md_date}'
+ORDER BY g.modified
 """

@@ -7,9 +7,6 @@ services:
       - .env
     healthcheck:
       test: [ "CMD", "pg_isready", "-q", "-d", "${POSTGRES_DB}", "-U", "${POSTGRES_USER}" ]
-
-      !!!blablabla!!!здесь нужен коммент
-
       interval: 2s
       timeout: 2s
       retries: 5
@@ -29,8 +26,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-
-      - и здесь нужен коммент
 
     volumes:
       - redis_volume:/data
@@ -62,16 +57,16 @@ services:
     volumes:
       - kibana_volume_compose:/usr/share/kibana/data
 
-  etl:
-    build:
-      context: ./etl
-    env_file:
-      - ./.env
-    depends_on:
-      db:
-        condition: service_healthy
-    container_name: etl_container
-    restart: unless-stopped
+#  etl:
+#    build:
+#      context: ./etl
+#    env_file:
+#      - ./.env
+#    depends_on:
+#      db:
+#        condition: service_healthy
+#    container_name: etl_container
+#    restart: unless-stopped
 
 
 volumes:
