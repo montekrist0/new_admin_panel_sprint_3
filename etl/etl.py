@@ -1,3 +1,4 @@
+import elasticsearch.exceptions
 import json
 import logging
 from contextlib import contextmanager
@@ -64,10 +65,10 @@ def pg_context(params: dict):
     max_tries=10
 )
 def get_data_from_pg(
-    cursor: DictCursor,
-    query: str,
-    last_md_date: str = '1970-01-01',
-    batch_size: int = 100
+        cursor: DictCursor,
+        query: str,
+        last_md_date: str = '1970-01-01',
+        batch_size: int = 100
 ) -> list:
     """
     Returns list of rows in dictionary format from database.
@@ -128,12 +129,8 @@ def create_elastic_index(elastic: Elasticsearch, index: dict) -> None:
         logging.info(f"Index insertion error -> {exc}")
 
 
-
-def transform_data(rows: list):
+def transform_data(rows: list, index_name):
     """Transform data for uploading to Elasticsearch."""
-    for row in rows:
-        del row["modified"]
-
     return [
         {
             "_index": "movies",
@@ -165,50 +162,76 @@ class PostgresExtractor:
     def extract_batch_from_database(self):
         self.db_cursor.execute(self.query.format(
             last_md_date=self.last_modified_date, batch_size=self.batch_size))
-        
+
         if self.db_cursor.rowcount:
             batch = self.db_cursor.fetchall()
             self.update_state(
                 old_value=self.last_modified_date,
                 new_value=batch[-1]['modified'].isoformat()
-                )
+            )
             return batch
-    
+
     def update_state(self, old_value, new_value):
         self.state_adapter.set_state(self.state_key, new_value)
         logging.info(f'State "{self.state_key}" updated from {old_value} to {new_value}')
 
 
 @dataclass
-class ETL_Config:
+class ETLConfig:
     query: str
     index_schema: dict
     state_key: str
+    elastic_index_name: str
+
 
 ETL_DATA = {
-    'movies': ETL_Config(query_film_work,movies_index,'film_last_modified_date'),
-    'genres': ETL_Config(query_genres,genre_index,'genre_last_modified_date'),
-    'persons': ETL_Config(query_persons,person_index,'person_last_modified_date')
+    'movies': ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies'),
+    'genres': ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres'),
+    'persons': ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons')
 }
 
-EXTRACTOR_NAMES = [
+ETL_DATA_NAMES = [
     "movies", "genres", "persons"
 ]
+
 
 def get_extractors(db_conn: PG_connection, state: State):
     return [
         PostgresExtractor(
-            db_cursor = db_conn.cursor(),
+            db_cursor=db_conn.cursor(),
             query=ETL_DATA[key].query,
             state_adapter=state,
             state_key=ETL_DATA[key].state_key
-        ) for key in EXTRACTOR_NAMES
+        ) for key in ETL_DATA_NAMES
     ]
 
 
 @dataclass
 class ElasticsearchLoader:
-    pass
+    index_schema: dict
+    index_name: str
+
+    def create_index(self, elastic_conn: Elasticsearch):
+        try:
+            elastic_conn.indices.create(index=self.index_name, **self.index_schema)
+        except Exception as exc:
+            logging.info(f'Index {self.index_name} insertion error -> {exc}')
+            # возможно стоит выкинуть исключение, чтобы обработать его сверху
+            # raise elasticsearch.exceptions.Any
+
+    @staticmethod
+    def load_data_to_elastic(elastic_conn: Elasticsearch, transformed_data: list):
+        """Loads list of records in Elasticsearch"""
+        helpers.bulk(elastic_conn, transformed_data)
+
+
+def get_loaders():
+    return [
+        ElasticsearchLoader(
+            index_schema=ETL_DATA[key].index_schema,
+            index_name=key
+        ) for key in ETL_DATA_NAMES
+    ]
 
 
 def main():
@@ -219,20 +242,9 @@ def main():
 
     with pg_context(dsl) as pg_conn:
         movies_extractor, genre_extractor, person_extractor = get_extractors(pg_conn, state)
+        movies_loader, genre_loader, person_loader = get_loaders()
 
         while True:
-            # film_last_modified_date = state.get_state('film_last_modified_date')
-            # # genre_last_modified_date = state.get_state('genre_last_modified_date')
-            # # person_last_modified_date = state.get_state('person_last_modified_date')
-            # film_last_modified_date = (
-            #     film_last_modified_date if film_last_modified_date
-            #     else '1970-01-01')
-
-            # data = get_data_from_pg(cursor=pg_conn.cursor(),
-            #                         query=query_film_work,
-            #                         last_md_date=film_last_modified_date,
-            #                         batch_size=100)
-
             data = movies_extractor.extract_batch_from_database()
 
             try:
@@ -242,13 +254,10 @@ def main():
                 logging.error("Film parsing went wrong")
 
             if data:
-                # last_modified_date = data[-1]['modified'].isoformat()
                 transformed_data = transform_data(data)
                 load_data_to_elastic(elastic_client=elastic,
                                      transformed_data=transformed_data)
-                # state.set_state('film_last_modified_date', film_last_modified_date)
-                # state.set_state('last_modified_date', last_modified_date)
-                # state.set_state('last_modified_date', last_modified_date)
+
             sleep(SLEEP_TIME)
 
 
