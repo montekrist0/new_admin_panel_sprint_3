@@ -88,6 +88,7 @@ LIMIT {batch_size};
 query_persons = """
 SELECT
     p.id,
+    p.modified,
     p.full_name,
     COALESCE (
         array_agg(DISTINCT pfw.role) 
@@ -95,7 +96,7 @@ SELECT
         '{{}}'
    ) AS role,
     COALESCE (
-        array_agg(DISTINCT pfw.film_work_id),
+        array_agg(DISTINCT pfw.film_work_id::text),
         '{{}}'
    ) AS film_ids
 FROM
@@ -130,7 +131,8 @@ ORDER BY p.modified
 query_genres = """
 SELECT
     g.id,
-    g.name
+    g.name,
+    g.modified
 FROM
     content.genre g
 WHERE g.modified > '{last_md_date}'

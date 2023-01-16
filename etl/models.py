@@ -1,9 +1,8 @@
 from datetime import date
-from typing import Optional, List
+from typing import List, Optional
 from uuid import UUID
 
 import orjson
-
 from pydantic import BaseModel
 
 
@@ -19,8 +18,11 @@ class IdMixin(BaseModel):
         json_dumps = orjson_dumps
 
 
-class Person(IdMixin):
+class PersonBase(IdMixin):
     full_name: str
+
+
+class Person(PersonBase):
     role: List[str] = []
     film_ids: List[UUID] = []
 
@@ -31,12 +33,12 @@ class Genre(IdMixin):
 
 class Film(IdMixin):
     title: str
-    description: str
+    description: str = None
     creation_date: date = None
     imdb_rating: Optional[float] = None
     genres: List[Genre] = []
-    actors: List[Person] = []
+    actors: List[PersonBase] = []
     actors_names: List[str] = []
-    directors: List[Person] = []
-    writers: List[Person] = []
+    directors: List[PersonBase] = []
+    writers: List[PersonBase] = []
     writers_names: List[str] = []

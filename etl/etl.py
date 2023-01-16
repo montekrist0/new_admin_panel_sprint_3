@@ -1,33 +1,29 @@
-import elasticsearch.exceptions
 import json
 import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from time import sleep
 
 import backoff
+import elasticsearch.exceptions
 import psycopg2
+from backoff_handlers import (elastic_conn_backoff_hdlr,
+                              elastic_load_data_backoff_hdlr,
+                              pg_conn_backoff_hdlr, pg_conn_success_hdlr,
+                              pg_getdata_backoff_hdlr, pg_getdata_success_hdlr)
 from elasticsearch import Elasticsearch, helpers
-from psycopg2.extras import DictCursor
+from indices import genre_index, movies_index, person_index
+from models import Film, Genre, PersonBase, Person
 from psycopg2.extensions import connection as PG_connection
-from queries import query_film_work, query_persons, query_genres
-from redis import Redis
-from settings import dsl, ELASTIC_HOST, REDIS_HOST, SLEEP_TIME, ELASTIC_PORT
-from state import RedisStorage, State
-from indices import movies_index, person_index, genre_index
-from backoff_handlers import (
-    pg_conn_backoff_hdlr,
-    pg_conn_success_hdlr,
-    pg_getdata_backoff_hdlr,
-    pg_getdata_success_hdlr,
-    elastic_load_data_backoff_hdlr,
-    elastic_conn_backoff_hdlr,
-)
-from dataclasses import dataclass
+from psycopg2.extras import DictCursor
 from pydantic import BaseModel
-from models import Film
+from queries import query_film_work, query_genres, query_persons
+from redis import Redis
+from settings import ELASTIC_HOST, ELASTIC_PORT, REDIS_HOST, SLEEP_TIME, dsl
+from state import RedisStorage, State
+from typing import List, Union
 
 logging.basicConfig(
-    # filename='etl.log',
     level=logging.INFO,
     format='%(asctime)s:%(levelname)s:%(message)s'
 )
@@ -129,17 +125,6 @@ def create_elastic_index(elastic: Elasticsearch, index: dict) -> None:
         logging.info(f"Index insertion error -> {exc}")
 
 
-def transform_data(rows: list, index_name):
-    """Transform data for uploading to Elasticsearch."""
-    return [
-        {
-            "_index": "movies",
-            "_id": row["id"],
-            "_source": row
-        } for row in rows
-    ]
-
-
 def get_last_modified_date(state: State, key):
     last_modified_date = state.get_state('last_modified_date')
     return last_modified_date if last_modified_date else '1970-01-01'
@@ -150,8 +135,12 @@ class PostgresExtractor:
     db_cursor: DictCursor
     query: str
     state_adapter: State
+    related_model: BaseModel
     batch_size: int = 100
     state_key: str = 'last_modified_date'
+
+    def __str__(self):
+        return type(self.related_model).__name__
 
     def __post_init__(self):
         self.last_modified_date = self.state_adapter.get_state(self.state_key)
@@ -162,13 +151,14 @@ class PostgresExtractor:
     def extract_batch_from_database(self):
         self.db_cursor.execute(self.query.format(
             last_md_date=self.last_modified_date, batch_size=self.batch_size))
-
-        if self.db_cursor.rowcount:
+        rows_count = self.db_cursor.rowcount
+        if rows_count:
             batch = self.db_cursor.fetchall()
             self.update_state(
                 old_value=self.last_modified_date,
                 new_value=batch[-1]['modified'].isoformat()
             )
+            logging.info(f'\tExtracted {rows_count} rows for {self}s')
             return batch
 
     def update_state(self, old_value, new_value):
@@ -182,15 +172,16 @@ class ETLConfig:
     index_schema: dict
     state_key: str
     elastic_index_name: str
+    related_model: Union[Film, Genre, Person]
 
 
-ETL_DATA = {
-    'movies': ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies'),
-    'genres': ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres'),
-    'persons': ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons')
+ETL_CONFIGS = {
+    'movies': ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies', Film),
+    'genres': ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres', Genre),
+    'persons': ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons', Person)
 }
 
-ETL_DATA_NAMES = [
+ETL_INDICES = [
     "movies", "genres", "persons"
 ]
 
@@ -199,10 +190,11 @@ def get_extractors(db_conn: PG_connection, state: State):
     return [
         PostgresExtractor(
             db_cursor=db_conn.cursor(),
-            query=ETL_DATA[key].query,
+            query=ETL_CONFIGS[key].query,
             state_adapter=state,
-            state_key=ETL_DATA[key].state_key
-        ) for key in ETL_DATA_NAMES
+            related_model=ETL_CONFIGS[key].related_model,
+            state_key=ETL_CONFIGS[key].state_key
+        ) for key in ETL_INDICES
     ]
 
 
@@ -216,8 +208,6 @@ class ElasticsearchLoader:
             elastic_conn.indices.create(index=self.index_name, **self.index_schema)
         except Exception as exc:
             logging.info(f'Index {self.index_name} insertion error -> {exc}')
-            # возможно стоит выкинуть исключение, чтобы обработать его сверху
-            # raise elasticsearch.exceptions.Any
 
     @staticmethod
     def load_data_to_elastic(elastic_conn: Elasticsearch, transformed_data: list):
@@ -228,37 +218,56 @@ class ElasticsearchLoader:
 def get_loaders():
     return [
         ElasticsearchLoader(
-            index_schema=ETL_DATA[key].index_schema,
+            index_schema=ETL_CONFIGS[key].index_schema,
             index_name=key
-        ) for key in ETL_DATA_NAMES
+        ) for key in ETL_INDICES
     ]
+
+
+@dataclass
+class ETLHandler:
+    extractor: PostgresExtractor
+    loader: ElasticsearchLoader
+    config: ETLConfig = None
+
+    def transform_data(self, rows: list, index_name):
+        """Transform data for uploading to Elasticsearch."""
+        try:
+            return [
+                {
+                    "_index": self.loader.index_name,
+                    "_id": row['id'],
+                    "_source": self.extractor.related_model(**row).json()
+                } for row in rows
+            ]
+        except Exception as exc:
+            logging.info(exc)
+            raise exc
+
+    def process(self, elastic_conn):
+        data = self.extractor.extract_batch_from_database()
+        if data:
+            transformed_data = self.transform_data(rows=data, index_name=self.loader.index_name)
+            self.loader.load_data_to_elastic(elastic_conn, transformed_data)
 
 
 def main():
     """Main process"""
     logging.info('Start etl process')
+
     state = State(RedisStorage(Redis(host=REDIS_HOST)))
     elastic = create_elastic_connection()
-
     with pg_context(dsl) as pg_conn:
-        movies_extractor, genre_extractor, person_extractor = get_extractors(pg_conn, state)
-        movies_loader, genre_loader, person_loader = get_loaders()
+        etl_handlers = [
+            ETLHandler(extractor, loader) for extractor, loader in zip(get_extractors(pg_conn, state), get_loaders())
+        ]
+
+        for etl_handler in etl_handlers:
+            etl_handler.loader.create_index(elastic)
 
         while True:
-            data = movies_extractor.extract_batch_from_database()
-
-            try:
-                tr_data = [Film(**row) for row in data]
-                a = 1
-            except:
-                logging.error("Film parsing went wrong")
-
-            if data:
-                transformed_data = transform_data(data)
-                load_data_to_elastic(elastic_client=elastic,
-                                     transformed_data=transformed_data)
-
-            sleep(SLEEP_TIME)
+            for etl_handler in etl_handlers:
+                etl_handler.process(elastic)
 
 
 if __name__ == '__main__':
