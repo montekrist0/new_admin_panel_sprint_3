@@ -29,6 +29,11 @@ class RedisStorage(BaseStorage):
                   for key in self.redis_adapter.scan_iter()}
         return result
 
+    def clear_cache(self):
+        """Clear redis cache"""
+        for key in self.redis_adapter.scan_iter():
+            self.redis_adapter.delete(key)
+
 
 class State:
     """
@@ -44,23 +49,15 @@ class State:
         json_dict[key] = value
         self.storage.save_state(json_dict)
 
-    def get_state(self, key: str) -> Any:
+    def get_state(self, key: str, default=None) -> Any:
         """Получить состояние по определённому ключу"""
         json_dict = self.storage.retrieve_state()
         try:
             return json_dict[key]
         except Exception:
-            return None
-
-
-def clear_cache(cache: Redis):
-    """Clear redis cache"""
-    for key in cache.scan_iter():
-        cache.delete(key)
+            return default
 
 
 if __name__ == '__main__':
-    r = Redis()
 
-    clear_cache(r)
-    a = 1
+    print("State is running")
