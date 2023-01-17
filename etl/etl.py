@@ -3,6 +3,7 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import sleep
+import asyncio
 
 import backoff
 import psycopg2
@@ -16,7 +17,7 @@ from models import Film, Genre, Person
 from psycopg2.extensions import connection as PG_connection
 from psycopg2.extras import DictCursor
 from pydantic import BaseModel
-from queries import query_film_work, query_genres, query_persons
+from queries import query_film_work, query_genres, query_persons, new_film_query
 from redis import Redis
 from settings import ELASTIC_HOST, ELASTIC_PORT, REDIS_HOST, SLEEP_TIME, dsl
 from state import RedisStorage, State
@@ -69,12 +70,12 @@ def create_elastic_connection():
 class PostgresExtractor:
     db_cursor: DictCursor
 
-    def extract_batch_from_database(self, query: str):
+    def extract_batch_from_database(self, query: str, fetch_size: int = 100):
         self.db_cursor.execute(query)
-        rows_count = self.db_cursor.rowcount
-        if rows_count:
-            batch = self.db_cursor.fetchall()
-            return batch
+        rows = self.db_cursor.fetchmany(fetch_size)
+        while rows:
+            yield rows
+            rows = self.db_cursor.fetchmany(fetch_size)
 
 
 @dataclass
@@ -84,10 +85,12 @@ class ETLConfig:
     state_key: str
     elastic_index_name: str
     related_model: Union[Film, Genre, Person]
+    batch_size: int = 100
+    limit_size: int = 5000
 
 
 ETL_CONFIGS = [
-    ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies', Film),
+    ETLConfig(new_film_query, movies_index, 'film_last_modified_date', 'movies', Film),
     ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres', Genre),
     ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons', Person)
 ]
@@ -112,7 +115,6 @@ class ETLHandler:
     extractor: PostgresExtractor
     loader: ElasticsearchLoader
     config: ETLConfig
-    batch_size: int = 100
     state_option: str = 'modified'
 
     def transform_data(self, rows: list):
@@ -132,20 +134,26 @@ class ETLHandler:
     def process(self, elastic_conn, state: State):
         self.last_modified_date = state.get_state(key=self.config.state_key, default='1970-01-01')
         formatted_query = self.config.query.format(
-            last_md_date=self.last_modified_date, batch_size=self.batch_size)
-        data = self.extractor.extract_batch_from_database(query=formatted_query)
-        if data:
-            new_last_modified_date = data[-1][self.state_option].isoformat()
-            transformed_data = self.transform_data(rows=data)
-            try:
-                self.loader.load_data_to_elastic(elastic_conn, transformed_data)
-            except Exception as exc:
-                logging.error(exc)
-            else:
-                state.set_state(self.config.state_key, new_last_modified_date)
-                logging.info(f'\tExtracted {len(data)} rows for {self.config.elastic_index_name}')
-                logging.info(
-                    f'State "{self.config.state_key}" updated from {self.last_modified_date} to {new_last_modified_date}')
+            last_md_date=self.last_modified_date,
+            limit=self.config.limit_size)
+
+        for batch in self.extractor.extract_batch_from_database(query=formatted_query, fetch_size=self.config.batch_size):
+            if batch:
+                new_last_modified_date = batch[-1][self.state_option].isoformat()
+                transformed_data = self.transform_data(rows=batch)
+                try:
+                    self.loader.load_data_to_elastic(elastic_conn, transformed_data)
+                except Exception as exc:
+                    logging.error(exc)
+                else:
+                    state.set_state(self.config.state_key, new_last_modified_date)
+                    logging.info(f'\tExtracted {len(batch)} rows for {self.config.elastic_index_name}')
+                    logging.info(
+                        f'State "{self.config.state_key}" updated from {self.last_modified_date} to {new_last_modified_date}')
+
+        # else:
+        #     await asyncio.sleep(50)
+        #     logging.info(f'ETL for {self.config.elastic_index_name} stopped for 60 seconds')
 
 
 def main():
@@ -171,6 +179,7 @@ def main():
         while True:
             for etl_handler in etl_handlers:
                 etl_handler.process(elastic_conn=elastic, state=state)
+                # await etl_handler.process(elastic_conn=elastic, state=state)
 
 
 if __name__ == '__main__':
