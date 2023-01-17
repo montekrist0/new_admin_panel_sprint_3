@@ -108,26 +108,6 @@ ORDER BY p.modified
 LIMIT {batch_size}
 """
 
-query_persons_test = """
-SELECT
-    p.id,
-    p.full_name,
-    COALESCE (
-        array_agg(DISTINCT pfw.role) 
-            FILTER (WHERE pfw.role IS NOT NULL), 
-        '{}'
-   ) AS role,
-    COALESCE (
-        array_agg(DISTINCT pfw.film_work_id),
-        '{}'
-   ) AS film_ids
-FROM
-    content.person_film_work pfw
-    LEFT JOIN content.person p ON p.id = pfw.person_id
-GROUP BY p.id
-ORDER BY p.modified
-"""
-
 query_genres = """
 SELECT
     g.id,
