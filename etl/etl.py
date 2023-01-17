@@ -133,14 +133,7 @@ def get_last_modified_date(state: State, key):
 @dataclass
 class PostgresExtractor:
     db_cursor: DictCursor
-    query: str
-    state_adapter: State
-    related_model: BaseModel
     batch_size: int = 100
-    state_key: str = 'last_modified_date'
-
-    def __str__(self):
-        return type(self.related_model).__name__
 
     def __post_init__(self):
         self.last_modified_date = self.state_adapter.get_state(self.state_key)
@@ -148,8 +141,8 @@ class PostgresExtractor:
             self.last_modified_date if self.last_modified_date
             else '1970-01-01')
 
-    def extract_batch_from_database(self):
-        self.db_cursor.execute(self.query.format(
+    def extract_batch_from_database(self, query):
+        self.db_cursor.execute(query.format(
             last_md_date=self.last_modified_date, batch_size=self.batch_size))
         rows_count = self.db_cursor.rowcount
         if rows_count:
@@ -175,11 +168,11 @@ class ETLConfig:
     related_model: Union[Film, Genre, Person]
 
 
-ETL_CONFIGS = {
-    'movies': ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies', Film),
-    'genres': ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres', Genre),
-    'persons': ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons', Person)
-}
+ETL_CONFIGS = [
+    ETLConfig(query_film_work, movies_index, 'film_last_modified_date', 'movies', Film),
+    ETLConfig(query_genres, genre_index, 'genre_last_modified_date', 'genres', Genre),
+    ETLConfig(query_persons, person_index, 'person_last_modified_date', 'persons', Person)
+]
 
 ETL_INDICES = [
     "movies", "genres", "persons"
@@ -188,26 +181,17 @@ ETL_INDICES = [
 
 def get_extractors(db_conn: PG_connection, state: State):
     return [
-        PostgresExtractor(
-            db_cursor=db_conn.cursor(),
-            query=ETL_CONFIGS[key].query,
-            state_adapter=state,
-            related_model=ETL_CONFIGS[key].related_model,
-            state_key=ETL_CONFIGS[key].state_key
-        ) for key in ETL_INDICES
+        PostgresExtractor(db_cursor=db_conn.cursor(), state_adapter=state) for _ in ETL_INDICES
     ]
 
 
-@dataclass
 class ElasticsearchLoader:
-    index_schema: dict
-    index_name: str
-
-    def create_index(self, elastic_conn: Elasticsearch):
+    @staticmethod
+    def create_index(index_name: str, index_schema: dict, elastic_conn: Elasticsearch):
         try:
-            elastic_conn.indices.create(index=self.index_name, **self.index_schema)
+            elastic_conn.indices.create(index=index_name, **index_schema)
         except Exception as exc:
-            logging.info(f'Index {self.index_name} insertion error -> {exc}')
+            logging.info(f'Index {index_name} insertion error -> {exc}')
 
     @staticmethod
     def load_data_to_elastic(elastic_conn: Elasticsearch, transformed_data: list):
@@ -217,10 +201,7 @@ class ElasticsearchLoader:
 
 def get_loaders():
     return [
-        ElasticsearchLoader(
-            index_schema=ETL_CONFIGS[key].index_schema,
-            index_name=key
-        ) for key in ETL_INDICES
+        ElasticsearchLoader() for _ in ETL_INDICES
     ]
 
 
@@ -228,9 +209,15 @@ def get_loaders():
 class ETLHandler:
     extractor: PostgresExtractor
     loader: ElasticsearchLoader
-    config: ETLConfig = None
+    config: ETLConfig
 
-    def transform_data(self, rows: list, index_name):
+    def get_last_modified_date(self):
+        self.last_modified_date = self.state_adapter.get_state(self.state_key)
+        self.last_modified_date = (
+            self.last_modified_date if self.last_modified_date
+            else '1970-01-01')
+
+    def transform_data(self, rows: list):
         """Transform data for uploading to Elasticsearch."""
         try:
             return [
@@ -247,8 +234,19 @@ class ETLHandler:
     def process(self, elastic_conn):
         data = self.extractor.extract_batch_from_database()
         if data:
-            transformed_data = self.transform_data(rows=data, index_name=self.loader.index_name)
+            transformed_data = self.transform_data(rows=data)
             self.loader.load_data_to_elastic(elastic_conn, transformed_data)
+
+
+def get_etl_handlers(indices: List[ETLConfig], pg_conn: PG_connection, state: State, elastic: Elasticsearch):
+    return [
+        ETLHandler(extractor, loader, config)
+        for extractor, loader, config in zip(
+            get_extractors(pg_conn, state),
+            get_loaders(),
+            indices
+        )
+    ]
 
 
 def main():
@@ -258,6 +256,7 @@ def main():
     state = State(RedisStorage(Redis(host=REDIS_HOST)))
     elastic = create_elastic_connection()
     with pg_context(dsl) as pg_conn:
+        etl_handlers = get_etl_handlers(ETL_INDICES, pg_conn, state, elastic)
         etl_handlers = [
             ETLHandler(extractor, loader) for extractor, loader in zip(get_extractors(pg_conn, state), get_loaders())
         ]
