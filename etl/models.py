@@ -1,6 +1,5 @@
 from datetime import date
 from typing import List, Optional
-from uuid import UUID
 
 import orjson
 from pydantic import BaseModel
@@ -11,7 +10,7 @@ def orjson_dumps(v, *, default):
 
 
 class IdMixin(BaseModel):
-    id: UUID
+    id: str
 
     class Config:
         json_loads = orjson.loads
@@ -24,7 +23,7 @@ class PersonBase(IdMixin):
 
 class Person(PersonBase):
     role: List[str] = []
-    film_ids: List[UUID] = []
+    film_ids: List[str] = []
 
 
 class Genre(IdMixin):
