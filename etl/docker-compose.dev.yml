@@ -1,0 +1,75 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:13
+    container_name: db_container
+    env_file:
+      - .env
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "${POSTGRES_DB}", "-U", "${POSTGRES_USER}" ]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+    restart: on-failure
+    volumes:
+      - postgresql_volume_compose:/var/lib/postgresql/data
+      - ./etl/dump.sql:/docker-entrypoint-initdb.d/dump.sql
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7.0.7
+    container_name: redis_container
+    restart: always
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - redis_volume:/data
+    ports:
+      - "6379:6379"
+
+  elastic:
+    image: elasticsearch:8.5.3
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=false
+      - USE_SSL=false
+    container_name: elastic_compose
+    ports:
+      - "9200:9200"
+    volumes:
+      - elastic_volume_compose:/usr/share/elasticsearch/data
+
+  kibana:
+    image: kibana:8.5.3
+    environment:
+      - ELASTICSEARCH_HOSTS=["http://elastic:9200"]
+    ports:
+      - "5601:5601"
+    container_name: kibana_compose
+    depends_on:
+      - elastic
+    volumes:
+      - kibana_volume_compose:/usr/share/kibana/data
+
+  etl:
+    build:
+      context: ./etl
+    env_file:
+      - ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+    container_name: etl_container
+    restart: unless-stopped
+
+
+volumes:
+  postgresql_volume_compose:
+  elastic_volume_compose:
+  kibana_volume_compose:
+  redis_volume:
